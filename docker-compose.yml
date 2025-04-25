@@ -1,0 +1,34 @@
+services:
+  spark-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: iot-spark-app:latest
+    container_name: iot_spark_container
+    volumes:
+      - ./src:/app/src
+      - ./data:/app/data
+      - ./jars:/app/jars
+    depends_on:
+      - clickhouse-server
+    environment:
+      - CLICKHOUSE_HOST=clickhouse-server
+    command: tail -f /dev/null
+
+  clickhouse-server:
+    image: clickhouse/clickhouse-server:latest
+    container_name: iot_clickhouse_server
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse/
+      - ./clickhouse_scripts:/docker-entrypoint-initdb.d
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    restart: always
+
+volumes:
+  clickhouse_data:
