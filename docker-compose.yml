@@ -100,6 +100,8 @@ services:
       - ./src:/app/src
       - ./data:/app/data
       - ./jars:/app/jars
+    ports:
+    - "4040:4040"
     environment:
       - CLICKHOUSE_HOST=clickhouse-server
     networks:
@@ -116,6 +118,7 @@ services:
     volumes:
       - clickhouse_data:/var/lib/clickhouse/
       - ./clickhouse_scripts:/docker-entrypoint-initdb.d
+      - ./data:/var/lib/clickhouse/user_files/pipeline_data:ro
     ulimits:
       nofile:
         soft: 262144
@@ -123,6 +126,11 @@ services:
     networks:
       - iot_network
     restart: always
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--user=${CLICKHOUSE_DEFAULT_USER:-default}", "--password=${CLICKHOUSE_DEFAULT_PASSWORD:-}", "-q", "SELECT 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
 networks:
   iot_network:

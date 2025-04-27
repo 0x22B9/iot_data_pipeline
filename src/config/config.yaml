@@ -1,6 +1,6 @@
 paths:
   input_data: "/app/data/input/"
-  output_data: "/app/data/output/processed_iot_data.parquet"
+  output_data: "/app/data/output/iot_parquet"
   jdbc_driver_path: "/app/jars/clickhouse-jdbc-0.8.4-all.jar"
 
 spark:
@@ -13,9 +13,5 @@ clickhouse:
   host: "clickhouse-server"
   port: 8123
   user: "spark_user"
-  password: "YourSecurePassword"
   db: "default"
   table: "iot_data"
-  jdbc_url: "jdbc:clickhouse://clickhouse-server:8123/default"
-  driver: "com.clickhouse.jdbc.ClickHouseDriver"
-  batch_size: 100000

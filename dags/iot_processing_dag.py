@@ -1,113 +1,86 @@
 from __future__ import annotations
 
-import os
-
 import pendulum
-
-try:
-    from docker.types import Mount
-except ImportError:
-    print("ERROR: Docker SDK not installed. Please install 'docker' library.")
-    Mount = None
-
-from airflow.exceptions import AirflowConfigException
+from airflow.models import Variable
 from airflow.models.dag import DAG
-from airflow.providers.docker.operators.docker import DockerOperator
+from airflow.operators.bash import BashOperator
+from airflow.operators.empty import EmptyOperator
 from airflow.utils.trigger_rule import TriggerRule
 
-COMPOSE_PROJECT_NAME = "iot_data_pipeline"
-DOCKER_NETWORK = f"{COMPOSE_PROJECT_NAME}_iot_network"
+try:
+    ch_user = Variable.get("iot_ch_user")
+    ch_password = Variable.get("iot_ch_password")
+    ch_db = Variable.get("iot_ch_db")
+    ch_table = Variable.get("iot_ch_table")
+    ch_container_name = Variable.get("iot_ch_container_name")
+    spark_container_name = Variable.get("iot_spark_container_name")
+    spark_parquet_dir_in_spark = Variable.get("iot_spark_parquet_dir_in_spark")
+    ch_parquet_dir_in_ch = Variable.get("iot_ch_parquet_dir_in_ch")
+except KeyError as e:
+    raise ValueError(f"Airflow Variable not set: {e}")
+
 SPARK_JAR_PATH_IN_CONTAINER = "/app/jars/clickhouse-jdbc-0.8.4-all.jar"
 SPARK_SCRIPT_PATH_IN_CONTAINER = "/app/src/jobs/process_iot_data.py"
 SPARK_CONFIG_PATH_IN_CONTAINER = "/app/src/config/config.yaml"
-SPARK_CONTAINER_USER = "1001"
-
-HOST_PROJECT_PATH = os.getenv("HOST_PROJECT_PATH")
-if not HOST_PROJECT_PATH:
-    raise AirflowConfigException(
-        "Environment variable HOST_PROJECT_PATH is not set in .env.airflow. "
-        "Set it to the absolute path of the project root on the host machine (use '/' separators)."
-    )
-
-print(f"DEBUG: Using HOST_PROJECT_PATH='{HOST_PROJECT_PATH}'")
-
-VOLUMES_LIST = [
-    f"{HOST_PROJECT_PATH}/src:/app/src:ro",
-    f"{HOST_PROJECT_PATH}/data:/app/data",
-    f"{HOST_PROJECT_PATH}/jars:/app/jars:ro",
-]
-print(f"DEBUG: Constructed volumes for DockerOperator: {VOLUMES_LIST}")
-
-if Mount is None:
-    raise AirflowConfigException("Docker SDK 'Mount' type could not be imported.")
-
-MOUNTS_LIST = [
-    Mount(
-        target="/app/src",
-        source=f"{HOST_PROJECT_PATH}/src",
-        type="bind",
-        read_only=True,
-    ),
-    Mount(
-        target="/app/data",
-        source=f"{HOST_PROJECT_PATH}/data",
-        type="bind",
-        read_only=False,
-    ),
-    Mount(
-        target="/app/jars",
-        source=f"{HOST_PROJECT_PATH}/jars",
-        type="bind",
-        read_only=True,
-    ),
-]
-print(f"DEBUG: Constructed mounts for DockerOperator: {MOUNTS_LIST}")
 
 with DAG(
-    dag_id="iot_data_processing_pipeline",
+    dag_id="iot_data_processing_pipeline_parquet",
     start_date=pendulum.datetime(2025, 4, 27, tz="UTC"),
     catchup=False,
     schedule=None,
-    tags=["iot", "spark", "docker", "clickhouse"],
+    tags=["iot", "spark", "docker", "clickhouse", "parquet", "bash"],
 ) as dag:
-    start = DockerOperator(
-        task_id="start_placeholder",
-        image="bash:latest",
-        command="echo 'Starting IoT Data Processing...'",
-        auto_remove=True,
+    start = EmptyOperator(task_id="start")
+
+    cleanup_previous_parquet = BashOperator(
+        task_id="cleanup_previous_parquet",
+        bash_command=f"docker exec {spark_container_name} rm -rf {spark_parquet_dir_in_spark}",
     )
 
-    run_spark_job = DockerOperator(
-        task_id="run_spark_iot_job",
-        image="iot-spark-app:latest",
-        command=[
-            "spark-submit",
-            "--master",
-            "local[*]",
-            "--jars",
-            SPARK_JAR_PATH_IN_CONTAINER,
-            SPARK_SCRIPT_PATH_IN_CONTAINER,
-            "--config-path",
-            SPARK_CONFIG_PATH_IN_CONTAINER,
-        ],
-        docker_url="unix://var/run/docker.sock",
-        network_mode=DOCKER_NETWORK,
-        user=SPARK_CONTAINER_USER,
-        mounts=MOUNTS_LIST,
-        auto_remove=True,
-        mount_tmp_dir=False,
-        tty=False,
-        environment={
-            "CLICKHOUSE_HOST": "clickhouse-server",
-        },
+    spark_submit_command = f"""
+    docker exec \\
+        -e CLICKHOUSE_PASSWORD='{ch_password}' \\
+        {spark_container_name} spark-submit \\
+        --master local[*] \\
+        --jars {SPARK_JAR_PATH_IN_CONTAINER} \\
+        {SPARK_SCRIPT_PATH_IN_CONTAINER} \\
+        --config-path {SPARK_CONFIG_PATH_IN_CONTAINER}
+    """
+    run_spark_job = BashOperator(
+        task_id="run_spark_to_parquet_job",
+        bash_command=spark_submit_command,
+        append_env=True,
     )
 
-    end = DockerOperator(
-        task_id="end_placeholder",
-        image="bash:latest",
-        command="echo 'IoT Data Processing finished.'",
-        auto_remove=True,
-        trigger_rule=TriggerRule.ALL_SUCCESS,
+    truncate_clickhouse_table = BashOperator(
+        task_id="truncate_clickhouse_table",
+        bash_command=f"""
+        docker exec {ch_container_name} clickhouse-client \\
+            --user '{ch_user}' \\
+            --password '{ch_password}' \\
+            --query "TRUNCATE TABLE IF EXISTS {ch_db}.{ch_table}"
+        """,
     )
 
-    start >> run_spark_job >> end
+    load_parquet_command = f"""
+    docker exec {ch_container_name} clickhouse-client \\
+        --user '{ch_user}' \\
+        --password '{ch_password}' \\
+        --query "INSERT INTO {ch_db}.{ch_table} SELECT * FROM file('{ch_parquet_dir_in_ch}/*.parquet', 'Parquet')"
+    """
+
+    load_parquet_to_clickhouse = BashOperator(
+        task_id="load_parquet_to_clickhouse",
+        bash_command=load_parquet_command,
+    )
+
+    end = EmptyOperator(task_id="end", trigger_rule=TriggerRule.ALL_SUCCESS)
+
+    (
+        start
+        >> cleanup_previous_parquet
+        >> run_spark_job
+        >> truncate_clickhouse_table
+        >> load_parquet_to_clickhouse
+        >> end
+    )

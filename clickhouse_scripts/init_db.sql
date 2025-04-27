@@ -2,6 +2,8 @@ CREATE USER IF NOT EXISTS spark_user IDENTIFIED BY 'YourSecurePassword';
 
 GRANT ALL PRIVILEGES ON default.* TO spark_user;
 
+GRANT CREATE TEMPORARY TABLE, FILE ON *.* TO spark_user;
+
 CREATE TABLE IF NOT EXISTS default.iot_data (
     uid String,
     id_orig_h String,

@@ -1,6 +1,7 @@
 import argparse
 import logging
 import sys
+import os
 
 import yaml
 from pyspark.sql import SparkSession
@@ -197,7 +198,12 @@ def write_to_clickhouse(df, config):
     table = ch_config.get("table")
     driver = ch_config.get("driver")
     user = ch_config.get("user")
-    password = ch_config.get("password", "")
+    password = os.getenv("CLICKHOUSE_PASSWORD")
+    if not password:
+        logging.warning("CLICKHOUSE_PASSWORD environment variable not set. Attempting to read from config (legacy).")
+        if not password:
+            logging.error("ClickHouse password not found in environment variable CLICKHOUSE_PASSWORD or config.")
+            return
     batch_size = ch_config.get("batch_size", 100000)
 
     if not all([url, table, driver]):
@@ -221,9 +227,7 @@ def write_to_clickhouse(df, config):
 
     try:
         df.write.jdbc(url=url, table=table, mode="append", properties=properties)
-        logging.info(
-            f"Successfully wrote {df.count()} rows to ClickHouse table: {table}"
-        )
+        logging.info(f"Successfully initiated write to ClickHouse table: {table}")
     except Exception as e:
         logging.error(f"Error writing to ClickHouse: {e}", exc_info=True)
 
@@ -250,28 +254,21 @@ def process_data(spark, config):
 
         logging.info("--- Initial Data ---")
         df.printSchema()
-        initial_count = df.count()
-        logging.info(f"Row count: {initial_count}")
-        if initial_count == 0:
-            logging.warning(f"No data found in {input_path}. Exiting.")
-            return
-        df.show(5, truncate=False)
 
         df_renamed = clean_col_names(df)
         df_transformed = transform_data(df_renamed)
 
         logging.info("--- Transformed Data ---")
         df_transformed.printSchema()
-        transformed_count = df_transformed.count()
-        logging.info(f"Row count after transformations: {transformed_count}")
-        df_transformed.show(5, truncate=False)
-
-        write_to_clickhouse(df_transformed, config)
 
         if output_path:
             logging.info(f"Saving transformed data to Parquet format at: {output_path}")
             df_transformed.write.mode("overwrite").parquet(output_path)
-            logging.info("Data saved successfully.")
+            logging.info(f"Data saved successfully to Parquet directory: {output_path}")
+        else:
+            logging.warning(
+                "Output path for Parquet is not defined in config. Skipping Parquet write."
+            )
 
     except AnalysisException as e:
         if "Path does not exist" in str(e):
