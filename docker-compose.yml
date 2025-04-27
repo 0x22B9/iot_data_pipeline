@@ -1,19 +1,111 @@
+x-airflow-common: &airflow-common
+  image: apache/airflow:2.9.1
+  env_file:
+    - .env.airflow
+  volumes:
+    - ./dags:/opt/airflow/dags:ro
+    - ./logs:/opt/airflow/logs
+    - ./plugins:/opt/airflow/plugins
+    - ./config:/opt/airflow/config
+    - /var/run/docker.sock:/var/run/docker.sock
+  depends_on:
+    - postgres
+  networks:
+    - iot_network
+
 services:
+  postgres:
+    image: postgres:17
+    container_name: iot_airflow_postgres
+    environment:
+      - POSTGRES_USER=${AIRFLOW_DB_USER:-airflow}
+      - POSTGRES_PASSWORD=${AIRFLOW_DB_PASSWORD:-airflow}
+      - POSTGRES_DB=${AIRFLOW_DB_NAME:-airflow}
+    volumes:
+      - airflow_postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - iot_network
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "${AIRFLOW_DB_USER:-airflow}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: always
+
+  airflow-init:
+    <<: *airflow-common
+    container_name: iot_airflow_init
+    command: >
+      bash -c "
+        echo 'Waiting for DB...' && \
+        airflow db check --retry 60 --retry-delay 1 && \
+        echo 'DB available, running migrations...' && \
+        airflow db migrate && \
+        echo 'Migrations done, creating user...' && \
+        airflow users create --role Admin --username \"${AIRFLOW_UID_AUTH:-admin}\" --firstname Airflow --lastname Admin --email admin@example.com --password \"${AIRFLOW_PWD:-admin}\" && \
+        echo 'User creation command finished.'
+      "
+    user: "${AIRFLOW_UID:-50000}:0"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - iot_network
+
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: iot_airflow_webserver
+    command: airflow webserver
+    ports:
+      - "8080:8080"
+    user: "${AIRFLOW_UID:-50000}:0"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    networks:
+      - iot_network
+    restart: always
+
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: iot_airflow_scheduler
+    command: airflow scheduler
+    user: "${AIRFLOW_UID:-50000}:0"
+    healthcheck:
+      test: ["CMD-SHELL", "airflow jobs check --job-type SchedulerJob --hostname $(hostname)"]
+      interval: 60s
+      timeout: 30s
+      retries: 3
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    networks:
+      - iot_network
+    restart: always
   spark-app:
     build:
       context: .
       dockerfile: Dockerfile
     image: iot-spark-app:latest
     container_name: iot_spark_container
+    command: tail -f /dev/null
     volumes:
       - ./src:/app/src
       - ./data:/app/data
       - ./jars:/app/jars
-    depends_on:
-      - clickhouse-server
     environment:
       - CLICKHOUSE_HOST=clickhouse-server
-    command: tail -f /dev/null
+    networks:
+      - iot_network
+    depends_on:
+      - clickhouse-server
 
   clickhouse-server:
     image: clickhouse/clickhouse-server:latest
@@ -28,7 +120,14 @@ services:
       nofile:
         soft: 262144
         hard: 262144
+    networks:
+      - iot_network
     restart: always
 
+networks:
+  iot_network:
+    driver: bridge
+
 volumes:
+  airflow_postgres_data:
   clickhouse_data:

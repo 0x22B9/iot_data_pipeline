@@ -1,5 +1,6 @@
 import argparse
 import logging
+import sys
 
 import yaml
 from pyspark.sql import SparkSession
@@ -63,8 +64,10 @@ def create_spark_session(config):
             spark_builder.config(f"spark.{key}", value)
 
     spark = spark_builder.getOrCreate()
-    logging.info("Spark session created successfully.\
-                \nSpark Configuration:")
+    logging.info(
+        "Spark session created successfully.\
+                \nSpark Configuration:"
+    )
     for key, value in spark.sparkContext.getConf().getAll():
         if "path" in key or "jar" in key:
             logging.info(f"{key} = {value}")
@@ -198,7 +201,9 @@ def write_to_clickhouse(df, config):
     batch_size = ch_config.get("batch_size", 100000)
 
     if not all([url, table, driver]):
-        logging.error("Missing required ClickHouse configuration: url, table, or driver.")
+        logging.error(
+            "Missing required ClickHouse configuration: url, table, or driver."
+        )
         return
 
     properties = {
@@ -210,16 +215,15 @@ def write_to_clickhouse(df, config):
     }
 
     logging.info(f"Writing data to ClickHouse table: {table} at {url}")
-    logging.info(f"JDBC Properties: user={user}, driver={driver}, batchsize={batch_size}")
+    logging.info(
+        f"JDBC Properties: user={user}, driver={driver}, batchsize={batch_size}"
+    )
 
     try:
-        df.write.jdbc(
-            url=url,
-            table=table,
-            mode="append",
-            properties=properties
+        df.write.jdbc(url=url, table=table, mode="append", properties=properties)
+        logging.info(
+            f"Successfully wrote {df.count()} rows to ClickHouse table: {table}"
         )
-        logging.info(f"Successfully wrote {df.count()} rows to ClickHouse table: {table}")
     except Exception as e:
         logging.error(f"Error writing to ClickHouse: {e}", exc_info=True)
 
@@ -241,7 +245,7 @@ def process_data(spark, config):
             sep=",",
             nullValue="-",
             recursiveFileLookup=True,
-            enforceSchema=True
+            enforceSchema=True,
         )
 
         logging.info("--- Initial Data ---")
@@ -282,29 +286,38 @@ def process_data(spark, config):
 
 
 def main():
-    """Main function for parsing arguments and starting processing"""
     parser = argparse.ArgumentParser(description="IoT Data Processing with Spark")
     parser.add_argument(
         "--config-path",
         default="src/config/config.yaml",
-        help="Path to the configuration YAML file.",
+        help="Path to the configuration YAML file (relative to /app).",
     )
     args = parser.parse_args()
 
     spark = None
+    exit_code = 0
     try:
-        config_path_in_container = f"/app/{args.config_path}"
-        config = load_config(config_path_in_container)
+        config = load_config(args.config_path)
         spark = create_spark_session(config)
         process_data(spark, config)
     except FileNotFoundError:
-         logging.error(f"Config file not found at {config_path_in_container}. Check the path and volume mounts.")
+        logging.error(
+            f"Config file not found at {args.config_path}. Check the path and volume mounts."
+        )
+        exit_code = 1
     except Exception as e:
         logging.error(f"Critical error occurred: {e}.", exc_info=True)
+        exit_code = 1
     finally:
         if spark:
             logging.info("Stopping Spark session.")
             spark.stop()
+        if exit_code != 0:
+            logging.error(f"Exiting with error code {exit_code}")
+            sys.exit(exit_code)
+        else:
+            logging.info("Process finished successfully.")
+
 
 if __name__ == "__main__":
     main()

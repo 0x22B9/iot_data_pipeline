@@ -1,4 +1,8 @@
-pyspark
+pyspark==3.5.5
 pyarrow
 apache-airflow
 pyyaml
+apache-airflow==2.9.1
+apache-airflow-providers-postgres
+apache-airflow-providers-docker
+docker
